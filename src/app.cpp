@@ -5,6 +5,7 @@
 #include "output.h"
 #include "overlay.h"
 #include "resource.h"
+#include "settings.h"
 #include "startup.h"
 #include "tray.h"
 
@@ -14,6 +15,7 @@
 #include <exception>
 #include <filesystem>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -26,12 +28,24 @@ constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr int kHotkeyId = 1;
 constexpr UINT_PTR kCaptureTimerId = 1;
 
-//  The capture shortcut. Plain Print Screen won't do: Windows keeps it for itself (Snipping
-//  Tool, or its classic copy to the clipboard) and only yields it to an app whose window is
-//  in the foreground, which a tray app never is. With a modifier it's an ordinary hotkey.
-constexpr UINT kHotkeyModifiers = MOD_CONTROL;
-constexpr UINT kHotkeyKey = VK_SNAPSHOT;
-constexpr wchar_t kHotkeyName[] = L"Ctrl+Print Screen";
+//  The capture shortcuts to choose from; the first is the default. Plain Print Screen isn't
+//  one of them: Windows keeps it for itself (Snipping Tool, or its classic copy to the
+//  clipboard) and only yields it to an app whose window is in the foreground, which a tray
+//  app never is. With a modifier it's an ordinary hotkey.
+struct Shortcut {
+    UINT modifiers;
+    const wchar_t* name;
+};
+
+constexpr Shortcut kShortcuts[] = {
+    {MOD_CONTROL, L"Ctrl+Print Screen"},
+    {MOD_SHIFT, L"Shift+Print Screen"},
+    {MOD_CONTROL | MOD_SHIFT, L"Ctrl+Shift+Print Screen"},
+};
+constexpr UINT kShortcutKey = VK_SNAPSHOT;
+
+//  The setting that remembers the chosen shortcut's modifiers.
+constexpr wchar_t kShortcutSetting[] = L"Shortcut";
 
 //  A short pause before capturing from the tray icon or its menu, so the closing menu or
 //  tray flyout doesn't end up in the screenshot.
@@ -42,6 +56,7 @@ enum Command : UINT {
     kCommandCapture = 1,
     kCommandStartWithWindows,
     kCommandExit,
+    kCommandShortcut = 100, // the first of one command per entry in kShortcuts, in order
 };
 
 //  What clicking the latest notification does.
@@ -73,6 +88,19 @@ std::optional<SavedScreenshot> TakeScreenshot(HINSTANCE instance) {
     return SavedScreenshot{SaveToScreenshotsFolder(png), image.width, image.height};
 }
 
+//  The saved shortcut's position in kShortcuts, or the default's if nothing valid was saved.
+size_t LoadShortcut() {
+    const std::optional<DWORD> saved = ReadSetting(kShortcutSetting);
+
+    for (size_t i = 0; saved && (i < std::size(kShortcuts)); ++i) {
+        if (kShortcuts[i].modifiers == *saved) {
+            return i;
+        }
+    }
+
+    return 0;
+}
+
 //  The hidden main window behind the tray icon: it owns the icon, the capture hotkey and the
 //  tray menu, and runs each capture.
 class App {
@@ -91,6 +119,7 @@ private:
     std::unique_ptr<TrayIcon> tray_;
     UINT taskbarCreatedMessage_; // broadcast when Explorer, and with it the tray, restarts
 
+    size_t shortcut_ = 0; // position in kShortcuts
     bool hotkeyRegistered_ = false;
     bool capturing_ = false;
     NotificationAction notificationAction_ = NotificationAction::None;
@@ -127,6 +156,7 @@ private:
     void OnCommand(UINT command);
     void ShowMenu(POINT at);
     void RegisterCaptureHotkey();
+    void ChangeShortcut(size_t index);
 
     void CaptureSoon();
     void Capture();
@@ -197,6 +227,7 @@ App::~App() {
 int App::Run(bool quietStart) {
     //  Fails if Explorer isn't up yet (early at sign-in); TaskbarCreated brings us back then.
     tray_->Show();
+    shortcut_ = LoadShortcut();
     RegisterCaptureHotkey();
 
     if (!quietStart) {
@@ -286,6 +317,17 @@ void App::OnTrayEvent(UINT event, POINT anchor) {
 }
 
 void App::OnCommand(UINT command) {
+    if ((command >= kCommandShortcut) && (command < kCommandShortcut + std::size(kShortcuts))) {
+        try {
+            ChangeShortcut(command - kCommandShortcut);
+        }
+        catch (const std::exception& e) {
+            ShowError(e.what());
+        }
+
+        return;
+    }
+
     switch (command) {
     case kCommandCapture:
         CaptureSoon();
@@ -314,12 +356,26 @@ void App::ShowMenu(POINT at) {
 
     //  The shortcut sits right-aligned next to the item, the way menus show them.
     const std::wstring captureItem =
-        hotkeyRegistered_ ? std::format(L"Capture\t{}", kHotkeyName) : L"Capture";
+        hotkeyRegistered_ ? std::format(L"Capture\t{}", kShortcuts[shortcut_].name) : L"Capture";
+
+    //  One radio item per shortcut, the one in use marked.
+    HMENU shortcuts = CreatePopupMenu();
+    for (size_t i = 0; i < std::size(kShortcuts); ++i) {
+        AppendMenuW(shortcuts, MF_STRING, kCommandShortcut + i, kShortcuts[i].name);
+    }
+    CheckMenuRadioItem(
+        shortcuts,
+        kCommandShortcut,
+        static_cast<UINT>(kCommandShortcut + std::size(kShortcuts) - 1),
+        static_cast<UINT>(kCommandShortcut + shortcut_),
+        MF_BYCOMMAND
+    );
 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kCommandCapture, captureItem.c_str());
     SetMenuDefaultItem(menu, kCommandCapture, FALSE);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), L"Shortcut");
     AppendMenuW(
         menu,
         MF_STRING | (IsStartWithWindowsEnabled() ? MF_CHECKED : MF_UNCHECKED),
@@ -335,12 +391,45 @@ void App::ShowMenu(POINT at) {
     TrackPopupMenuEx(menu, TPM_RIGHTBUTTON, at.x, at.y, window_, nullptr);
     PostMessageW(window_, WM_NULL, 0, 0);
 
-    DestroyMenu(menu);
+    DestroyMenu(menu); // takes the Shortcut submenu with it
 }
 
 void App::RegisterCaptureHotkey() {
-    hotkeyRegistered_ =
-        RegisterHotKey(window_, kHotkeyId, kHotkeyModifiers | MOD_NOREPEAT, kHotkeyKey) != FALSE;
+    hotkeyRegistered_ = RegisterHotKey(
+        window_,
+        kHotkeyId,
+        kShortcuts[shortcut_].modifiers | MOD_NOREPEAT,
+        kShortcutKey
+    ) != FALSE;
+}
+
+void App::ChangeShortcut(size_t index) {
+    const size_t previous = shortcut_;
+
+    UnregisterHotKey(window_, kHotkeyId);
+    shortcut_ = index;
+    RegisterCaptureHotkey();
+
+    if (!hotkeyRegistered_) {
+        //  Another app already uses it, so stay with the previous shortcut.
+        shortcut_ = previous;
+        RegisterCaptureHotkey();
+        Notify(
+            L"Shortcut not changed",
+            std::format(L"{} is already used by another app.", kShortcuts[index].name),
+            NotificationAction::None
+        );
+
+        return;
+    }
+
+    //  The default isn't stored, so a default setup leaves nothing in the registry.
+    if (index == 0) {
+        DeleteSetting(kShortcutSetting);
+    }
+    else {
+        WriteSetting(kShortcutSetting, kShortcuts[index].modifiers);
+    }
 }
 
 void App::CaptureSoon() {
@@ -378,8 +467,9 @@ void App::GreetUser() {
         Notify(
             L"cqptur is running",
             std::format(
-                L"Another app is using {}, so click the cqptur icon to take screenshots.",
-                kHotkeyName
+                L"Another app is using {}. Click the cqptur icon to take screenshots, or pick "
+                L"another shortcut from its menu.",
+                kShortcuts[shortcut_].name
             ),
             NotificationAction::None
         );
@@ -387,7 +477,7 @@ void App::GreetUser() {
     else {
         Notify(
             L"cqptur is running",
-            std::format(L"Press {} to take a screenshot.", kHotkeyName),
+            std::format(L"Press {} to take a screenshot.", kShortcuts[shortcut_].name),
             NotificationAction::None
         );
     }

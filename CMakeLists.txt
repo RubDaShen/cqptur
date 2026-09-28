@@ -7,6 +7,7 @@ add_executable(cqptur WIN32
     src/capture.cpp
     src/overlay.cpp
     src/output.cpp
+    src/settings.cpp
     src/startup.cpp
     src/tray.cpp
     src/cqptur.rc     # icon and version info

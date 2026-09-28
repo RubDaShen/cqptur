@@ -37,7 +37,8 @@ For now, you build it from this repository:
 
 Start a capture in any of these ways:
 
-- Press **Ctrl + Print Screen**.
+- Press **Ctrl + Print Screen**. You can switch to **Shift + Print Screen** or
+  **Ctrl + Shift + Print Screen** from the [tray menu](#the-tray-menu).
 - Click the cqptur icon.
 - Run `cqptur.exe` again, for example from a Start menu or taskbar shortcut.
 
@@ -67,18 +68,19 @@ Right-click the cqptur icon:
 
 | Item | What it does |
 |---|---|
-| **Capture** | Takes a screenshot. Shows *Ctrl+Print Screen* next to it while that shortcut belongs to cqptur. |
+| **Capture** | Takes a screenshot. Shows the shortcut next to it while that shortcut belongs to cqptur. |
+| **Shortcut** | Chooses the capture shortcut: *Ctrl+Print Screen* (the default), *Shift+Print Screen* or *Ctrl+Shift+Print Screen*. cqptur remembers your choice. |
 | **Start with Windows** | Starts cqptur automatically when you sign in. |
 | **Exit** | Closes cqptur. |
 
 ## Troubleshooting
 
 - **Print Screen opens Snipping Tool (or does nothing).** cqptur's shortcut is
-  **Ctrl + Print Screen**; Print Screen alone belongs to Windows.
-- **Ctrl + Print Screen does nothing.** Another app (another screenshot tool, for example)
-  may be using that shortcut. If so, cqptur's "cqptur is running" notification says so and
-  its menu shows **Capture** without a shortcut. Close that app or change its shortcut, then
-  right-click the cqptur icon so it picks the shortcut up again.
+  **Ctrl + Print Screen** (or the one you chose); Print Screen alone belongs to Windows.
+- **The shortcut does nothing.** Another app (another screenshot tool, for example) may be
+  using it. If so, cqptur's "cqptur is running" notification says so and its menu shows
+  **Capture** without a shortcut. Choose a different one under **Shortcut**, or close that
+  app and then right-click the cqptur icon so it picks the shortcut up again.
 - **I can't find the cqptur icon.** Click the **^** arrow next to the clock, or make the icon
   always visible as described in step 1 of [First-time setup](#first-time-setup).
 - **cqptur stopped starting with Windows after I moved it.** Right-click the icon and choose
@@ -87,8 +89,10 @@ Right-click the cqptur icon:
 ## Removing cqptur
 
 1. Right-click the cqptur icon. If **Start with Windows** is checked, click it to turn it off.
-2. Choose **Exit**.
-3. Delete `cqptur.exe`.
+2. If you changed the shortcut, set **Shortcut** back to **Ctrl+Print Screen**. cqptur only
+   stores a shortcut that isn't the default, so this clears its last setting.
+3. Choose **Exit**.
+4. Delete `cqptur.exe`.
 
 cqptur keeps no other files or settings. The screenshots you took stay in your Screenshots folder.
 
