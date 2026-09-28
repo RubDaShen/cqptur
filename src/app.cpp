@@ -11,7 +11,6 @@
 #include <shellapi.h>
 #include <windowsx.h>
 
-#include <cwchar>
 #include <exception>
 #include <filesystem>
 #include <format>
@@ -27,6 +26,13 @@ constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr int kHotkeyId = 1;
 constexpr UINT_PTR kCaptureTimerId = 1;
 
+//  The capture shortcut. Plain Print Screen won't do: Windows keeps it for itself (Snipping
+//  Tool, or its classic copy to the clipboard) and only yields it to an app whose window is
+//  in the foreground, which a tray app never is. With a modifier it's an ordinary hotkey.
+constexpr UINT kHotkeyModifiers = MOD_CONTROL;
+constexpr UINT kHotkeyKey = VK_SNAPSHOT;
+constexpr wchar_t kHotkeyName[] = L"Ctrl+Print Screen";
+
 //  A short pause before capturing from the tray icon or its menu, so the closing menu or
 //  tray flyout doesn't end up in the screenshot.
 constexpr UINT kCaptureDelayMs = 200;
@@ -34,7 +40,6 @@ constexpr UINT kCaptureDelayMs = 200;
 //  Tray menu commands.
 enum Command : UINT {
     kCommandCapture = 1,
-    kCommandPrintScreenSettings,
     kCommandStartWithWindows,
     kCommandExit,
 };
@@ -43,7 +48,6 @@ enum Command : UINT {
 enum class NotificationAction {
     None,
     OpenScreenshot,
-    OpenKeyboardSettings,
 };
 
 struct SavedScreenshot {
@@ -69,59 +73,8 @@ std::optional<SavedScreenshot> TakeScreenshot(HINSTANCE instance) {
     return SavedScreenshot{SaveToScreenshotsFolder(png), image.width, image.height};
 }
 
-DWORD WindowsBuild() {
-    wchar_t build[16]{};
-    DWORD size = sizeof(build);
-    RegGetValueW(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-        L"CurrentBuildNumber",
-        RRF_RT_REG_SZ,
-        nullptr,
-        build,
-        &size
-    );
-
-    return std::wcstoul(build, nullptr, 10);
-}
-
-//  Windows 11 can keep Print Screen for its own Snipping Tool (Settings > Accessibility >
-//  Keyboard > "Use the Print screen key to open screen capture"). RegisterHotKey still
-//  succeeds when it does, but the key never reaches us, so the setting has to be read.
-bool WindowsOwnsPrintScreen() {
-    DWORD enabled = 0;
-    DWORD size = sizeof(enabled);
-    const LSTATUS status = RegGetValueW(
-        HKEY_CURRENT_USER,
-        L"Control Panel\\Keyboard",
-        L"PrintScreenKeyForSnippingEnabled",
-        RRF_RT_REG_DWORD,
-        nullptr,
-        &enabled,
-        &size
-    );
-
-    if (status == ERROR_SUCCESS) {
-        return enabled != 0;
-    }
-
-    //  Never changed by the user, so Windows' default applies: on since Windows 11 22H2.
-    return WindowsBuild() >= 22621;
-}
-
-void OpenKeyboardSettings() {
-    ShellExecuteW(
-        nullptr,
-        L"open",
-        L"ms-settings:easeofaccess-keyboard",
-        nullptr,
-        nullptr,
-        SW_SHOWNORMAL
-    );
-}
-
-//  The hidden main window behind the tray icon: it owns the icon, the Print Screen hotkey
-//  and the tray menu, and runs each capture.
+//  The hidden main window behind the tray icon: it owns the icon, the capture hotkey and the
+//  tray menu, and runs each capture.
 class App {
 //	|-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-|
 //				    Members and Fields
@@ -173,7 +126,7 @@ private:
     void OnTrayEvent(UINT event, POINT anchor);
     void OnCommand(UINT command);
     void ShowMenu(POINT at);
-    void RegisterPrintScreen();
+    void RegisterCaptureHotkey();
 
     void CaptureSoon();
     void Capture();
@@ -244,7 +197,7 @@ App::~App() {
 int App::Run(bool quietStart) {
     //  Fails if Explorer isn't up yet (early at sign-in); TaskbarCreated brings us back then.
     tray_->Show();
-    RegisterPrintScreen();
+    RegisterCaptureHotkey();
 
     if (!quietStart) {
         GreetUser();
@@ -338,10 +291,6 @@ void App::OnCommand(UINT command) {
         CaptureSoon();
         break;
 
-    case kCommandPrintScreenSettings:
-        OpenKeyboardSettings();
-        break;
-
     case kCommandStartWithWindows:
         try {
             SetStartWithWindows(!IsStartWithWindowsEnabled());
@@ -358,25 +307,18 @@ void App::OnCommand(UINT command) {
 }
 
 void App::ShowMenu(POINT at) {
-    //  Another app may have let go of Print Screen since cqptur started.
+    //  Another app may have let go of the shortcut since cqptur started.
     if (!hotkeyRegistered_) {
-        RegisterPrintScreen();
+        RegisterCaptureHotkey();
     }
-    const bool snippingToolHasKey = WindowsOwnsPrintScreen();
+
+    //  The shortcut sits right-aligned next to the item, the way menus show them.
+    const std::wstring captureItem =
+        hotkeyRegistered_ ? std::format(L"Capture\t{}", kHotkeyName) : L"Capture";
 
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        kCommandCapture,
-        (hotkeyRegistered_ && !snippingToolHasKey) ? L"Capture\tPrint Screen" : L"Capture"
-    );
+    AppendMenuW(menu, MF_STRING, kCommandCapture, captureItem.c_str());
     SetMenuDefaultItem(menu, kCommandCapture, FALSE);
-
-    if (hotkeyRegistered_ && snippingToolHasKey) {
-        AppendMenuW(menu, MF_STRING, kCommandPrintScreenSettings, L"Use Print Screen for cqptur...");
-    }
-
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(
         menu,
@@ -396,8 +338,9 @@ void App::ShowMenu(POINT at) {
     DestroyMenu(menu);
 }
 
-void App::RegisterPrintScreen() {
-    hotkeyRegistered_ = RegisterHotKey(window_, kHotkeyId, MOD_NOREPEAT, VK_SNAPSHOT) != FALSE;
+void App::RegisterCaptureHotkey() {
+    hotkeyRegistered_ =
+        RegisterHotKey(window_, kHotkeyId, kHotkeyModifiers | MOD_NOREPEAT, kHotkeyKey) != FALSE;
 }
 
 void App::CaptureSoon() {
@@ -434,22 +377,17 @@ void App::GreetUser() {
     if (!hotkeyRegistered_) {
         Notify(
             L"cqptur is running",
-            L"Another app is using Print Screen, so click the cqptur icon to take screenshots.",
+            std::format(
+                L"Another app is using {}, so click the cqptur icon to take screenshots.",
+                kHotkeyName
+            ),
             NotificationAction::None
-        );
-    }
-    else if (WindowsOwnsPrintScreen()) {
-        Notify(
-            L"cqptur is running",
-            L"Print Screen still opens Snipping Tool. Click here to change that in Settings, "
-            L"or click the cqptur icon to take a screenshot.",
-            NotificationAction::OpenKeyboardSettings
         );
     }
     else {
         Notify(
             L"cqptur is running",
-            L"Press Print Screen to take a screenshot.",
+            std::format(L"Press {} to take a screenshot.", kHotkeyName),
             NotificationAction::None
         );
     }
@@ -464,10 +402,6 @@ void App::OnNotificationClicked() {
     switch (notificationAction_) {
     case NotificationAction::OpenScreenshot:
         ShellExecuteW(nullptr, L"open", lastScreenshot_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        break;
-
-    case NotificationAction::OpenKeyboardSettings:
-        OpenKeyboardSettings();
         break;
 
     case NotificationAction::None:
